@@ -158,17 +158,107 @@ def predict_label(
 # ---------------------------
 # Single-image inference
 # ---------------------------
-def infer_image(img_path: str, bank_path: str, thr: float):
+def infer_image(img_path: str, bank_path: str, thr: float, output_dir: str = None):
+    """
+    Run inference on a single image and optionally save results.
+
+    Args:
+        img_path: Path to input image
+        bank_path: Path to face bank
+        thr: Cosine similarity threshold
+        output_dir: Optional directory to save annotated image and results
+    """
+    import json
+    import os
+
     data = torch.load(bank_path)
     prototypes = data["prototypes"]
     mtcnn, resnet, device = create_models()
     img = Image.open(img_path).convert("RGB")
     emb, _, p = face_embed(img, mtcnn, resnet, device)
+
     if emb is None or (p is not None and p < 0.9):
         print("No confident face detected.")
+        if output_dir:
+            # Save result even for no detection
+            result = {
+                "image": img_path,
+                "prediction": "No face detected",
+                "confidence": 0.0,
+                "detection_prob": 0.0,
+            }
+            os.makedirs(output_dir, exist_ok=True)
+            result_file = os.path.join(output_dir, Path(img_path).stem + "_result.json")
+            with open(result_file, "w") as f:
+                json.dump(result, f, indent=2)
+            print(f"[saved] Result saved to {result_file}")
         return
+
     label, score = predict_label(emb, prototypes, thr)
     print(f"Prediction: {label}  (cosine={score:.3f}, det_prob={p:.2f})")
+
+    # Save results if output_dir is provided
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 1. Save annotated image
+        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+        # Detect face location for drawing box
+        boxes, probs = mtcnn.detect(img)
+        if boxes is not None and len(boxes) > 0:
+            box = boxes[0]
+            x1, y1, x2, y2 = [int(v) for v in box]
+
+            # Draw rectangle and label
+            color = (0, 255, 0) if label != "Unknown" else (0, 165, 255)
+            cv2.rectangle(img_cv, (x1, y1), (x2, y2), color, 2)
+
+            # Add label text
+            text = f"{label} ({score:.2f})"
+            font_scale = 0.7
+            thickness = 2
+            (text_width, text_height), _ = cv2.getTextSize(
+                text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
+
+            # Draw text background
+            cv2.rectangle(
+                img_cv, (x1, y1 - text_height - 10), (x1 + text_width, y1), color, -1
+            )
+
+            # Draw text
+            cv2.putText(
+                img_cv,
+                text,
+                (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
+
+        # Save annotated image
+        output_img_path = os.path.join(
+            output_dir, Path(img_path).stem + "_predicted.jpg"
+        )
+        cv2.imwrite(output_img_path, img_cv)
+        print(f"[saved] Annotated image saved to {output_img_path}")
+
+        # 2. Save prediction details as JSON
+        result = {
+            "image": img_path,
+            "prediction": label,
+            "cosine_similarity": float(score),
+            "detection_probability": float(p),
+            "threshold": thr,
+            "status": "recognized" if label != "Unknown" else "unknown",
+        }
+        result_file = os.path.join(output_dir, Path(img_path).stem + "_result.json")
+        with open(result_file, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"[saved] Result data saved to {result_file}")
 
 
 # ---------------------------
@@ -243,6 +333,12 @@ def main():
     p_infer.add_argument("--img", type=str, required=True)
     p_infer.add_argument("--bank", type=str, default="face_bank.pt")
     p_infer.add_argument("--thr", type=float, default=0.55)
+    p_infer.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to save annotated image and prediction results",
+    )
 
     p_cam = sub.add_parser("cam", help="Webcam recognition")
     p_cam.add_argument("--bank", type=str, default="face_bank.pt")
@@ -258,7 +354,7 @@ def main():
         print(f"[ok] Saved embedding bank → {args.out}")
 
     elif args.cmd == "infer":
-        infer_image(args.img, args.bank, args.thr)
+        infer_image(args.img, args.bank, args.thr, args.output_dir)
 
     elif args.cmd == "cam":
         webcam(args.bank, args.thr, args.cam_index)
